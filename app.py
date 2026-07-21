@@ -31,7 +31,7 @@ print("Loading MediaPipe Pose model...")
 mp_pose = mp_pose_module
 pose = mp_pose.Pose(
     static_image_mode=True,
-    model_complexity=1,  # 0=lite, 1=full, 2=heavy
+    model_complexity=0,  # 0=lite, 1=full, 2=heavy
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
