@@ -7,6 +7,8 @@ Actually better detection than OpenCV DNN.
 from flask import Flask, render_template, request, jsonify
 import cv2
 import mediapipe as mp
+from mediapipe.python.solutions import pose as mp_pose_module
+from mediapipe.python.solutions import drawing_utils as mp_drawing
 import numpy as np
 from werkzeug.utils import secure_filename
 from datetime import datetime
