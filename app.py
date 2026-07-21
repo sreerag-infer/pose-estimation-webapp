@@ -1,275 +1,282 @@
 """
-OpenCV Pose Estimation Web App - Production Ready
-Automatically downloads model weights from GitHub on startup
+Pose Estimation using MediaPipe
+No downloads needed! Works instantly.
+Actually better detection than OpenCV DNN.
 """
 
 from flask import Flask, render_template, request, jsonify
-import os
 import cv2
-import gc
+import mediapipe as mp
+from mediapipe.python.solutions import pose as mp_pose_module
+from mediapipe.python.solutions import drawing_utils as mp_drawing
 import numpy as np
 from werkzeug.utils import secure_filename
 from datetime import datetime
-import urllib.request
+import os
 
 app = Flask(__name__)
 
+# Configuration
 UPLOAD_FOLDER = 'static/uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
 MAX_FILE_SIZE = 10 * 1024 * 1024
-CONFIDENCE_THRESHOLD = 0.1
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs('models/coco', exist_ok=True)
-os.makedirs('models/mpi', exist_ok=True)
 
-COCO_PROTO = "models/coco/pose_deploy_linevec.prototxt"
-COCO_WEIGHTS = "models/coco/pose_iter_440000.caffemodel"
-MPII_PROTO = "models/mpi/pose_deploy_linevec_faster_4_stages.prototxt"
-MPII_WEIGHTS = "models/mpi/pose_iter_160000.caffemodel"
+# Initialize MediaPipe Pose
+print("Loading MediaPipe Pose model...")
+mp_pose = mp_pose_module
+pose = mp_pose.Pose(
+    static_image_mode=True,
+    model_complexity=1,  # 0=lite, 1=full, 2=heavy
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
-MODEL_URLS = {
-    'coco_weights': 'https://huggingface.co/gaijingeek/openpose-models/resolve/main/pose/coco/pose_iter_440000.caffemodel',
-    'mpii_weights': 'https://huggingface.co/gaijingeek/openpose-models/resolve/main/pose/mpi/pose_iter_160000.caffemodel',
-}
+print("✓ MediaPipe model loaded successfully!")
+print("Ready for pose estimation!")
 
-COCO_KEYPOINTS = [
-    "Nose", "Neck", "R Shoulder", "R Elbow", "R Wrist",
-    "L Shoulder", "L Elbow", "L Wrist", "R Hip", "R Knee",
-    "R Ankle", "L Hip", "L Knee", "L Ankle", "R Eye",
-    "L Eye", "R Ear", "L Ear"
+# MediaPipe Keypoint names (33 points)
+KEYPOINT_NAMES = [
+    "Nose",           # 0
+    "L Eye Inner",    # 1
+    "L Eye",          # 2
+    "L Eye Outer",    # 3
+    "R Eye Inner",    # 4
+    "R Eye",          # 5
+    "R Eye Outer",    # 6
+    "L Ear",          # 7
+    "R Ear",          # 8
+    "Mouth Left",     # 9
+    "Mouth Right",    # 10
+    "L Shoulder",     # 11
+    "R Shoulder",     # 12
+    "L Elbow",        # 13
+    "R Elbow",        # 14
+    "L Wrist",        # 15
+    "R Wrist",        # 16
+    "L Pinky",        # 17
+    "R Pinky",        # 18
+    "L Index",        # 19
+    "R Index",        # 20
+    "L Thumb",        # 21
+    "R Thumb",        # 22
+    "L Hip",          # 23
+    "R Hip",          # 24
+    "L Knee",         # 25
+    "R Knee",         # 26
+    "L Ankle",        # 27
+    "R Ankle",        # 28
+    "L Heel",         # 29
+    "R Heel",         # 30
+    "L Foot Index",   # 31
+    "R Foot Index"    # 32
 ]
 
-COCO_POSE_PAIRS = [
-    (1, 2), (1, 5), (2, 3), (3, 4), (5, 6), (6, 7),
-    (1, 8), (8, 9), (9, 10), (1, 11), (11, 12), (12, 13),
-    (1, 0), (0, 14), (14, 16), (0, 15), (15, 17), (2, 17), (5, 16)
+# Pose connections (skeleton)
+POSE_CONNECTIONS = [
+    # Face
+    (0, 1), (1, 2), (2, 3), (3, 7),
+    (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10),
+    
+    # Upper body
+    (11, 12),
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
+    
+    # Lower body
+    (11, 23), (12, 24),
+    (23, 24),
+    (23, 25), (25, 27),
+    (24, 26), (26, 28),
+    (27, 29), (28, 30),
+    (29, 31), (30, 32)
 ]
-
-MPII_KEYPOINTS = [
-    "Head", "Neck", "R Shoulder", "R Elbow", "R Wrist",
-    "L Shoulder", "L Elbow", "L Wrist", "R Hip", "R Knee",
-    "R Ankle", "L Hip", "L Knee", "L Ankle", "Chest"
-]
-
-MPII_POSE_PAIRS = [
-    (0, 1), (1, 2), (2, 3), (3, 4), (1, 5), (5, 6), (6, 7),
-    (1, 8), (8, 9), (9, 10), (1, 11), (11, 12), (12, 13), (1, 14)
-]
-
-KEYPOINT_COLOR = (0, 255, 255)
-SKELETON_COLOR = (0, 255, 0)
-
-MODELS_STATUS = {'coco': False, 'mpii': False}
-
-
-def download_file(url, filepath, description):
-    print(f"Downloading {description} from {url} ...")
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        urllib.request.urlretrieve(url, filepath)
-        print(f"Downloaded {description} successfully")
-        return True
-    except Exception as e:
-        print(f"Failed to download {description}: {e}")
-        return False
-
-
-def check_and_download_models():
-    print("Checking pose estimation models...")
-
-    if os.path.exists(COCO_WEIGHTS) and os.path.exists(COCO_PROTO):
-        print("COCO model found")
-        MODELS_STATUS['coco'] = True
-    else:
-        if download_file(MODEL_URLS['coco_weights'], COCO_WEIGHTS, "COCO weights"):
-            MODELS_STATUS['coco'] = os.path.exists(COCO_PROTO)
-
-    if os.path.exists(MPII_WEIGHTS) and os.path.exists(MPII_PROTO):
-        print("MPII model found")
-        MODELS_STATUS['mpii'] = True
-    else:
-        if download_file(MODEL_URLS['mpii_weights'], MPII_WEIGHTS, "MPII weights"):
-            MODELS_STATUS['mpii'] = os.path.exists(MPII_PROTO)
-
-    print(f"Model status: {MODELS_STATUS}")
-
 
 def allowed_file(filename):
+    """Check if file is allowed"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-
-def load_model(model_type='coco'):
-    try:
-        if model_type == 'coco':
-            if not MODELS_STATUS['coco']:
-                return None, "COCO model not available"
-            net = cv2.dnn.readNetFromCaffe(COCO_PROTO, COCO_WEIGHTS)
-        else:
-            if not MODELS_STATUS['mpii']:
-                return None, "MPII model not available"
-            net = cv2.dnn.readNetFromCaffe(MPII_PROTO, MPII_WEIGHTS)
-        return net, "OK"
-    except Exception as e:
-        return None, f"Error loading model: {str(e)}"
-
-
-def detect_keypoints(frame, net, model_type='coco'):
-    frameHeight, frameWidth = frame.shape[:2]
-    inpBlob = cv2.dnn.blobFromImage(frame, 1.0 / 255, (368, 368), (0, 0, 0), swapRB=False, crop=False)
-    net.setInput(inpBlob)
-    output = net.forward()
-
-    H, W = output.shape[2], output.shape[3]
-    num_keypoints = len(COCO_KEYPOINTS) if model_type == 'coco' else len(MPII_KEYPOINTS)
-    keypoints, confidences = [], []
-
-    for i in range(num_keypoints):
-        probMap = output[0, i, :, :]
-        _, prob, _, point = cv2.minMaxLoc(probMap)
-        x = (frameWidth * point[0]) / W
-        y = (frameHeight * point[1]) / H
-
-        if prob > CONFIDENCE_THRESHOLD:
-            keypoints.append((int(x), int(y)))
-        else:
-            keypoints.append(None)
-        confidences.append(prob)
-
-    return keypoints, confidences
-
-
-def draw_skeleton(frame, keypoints, model_type='coco'):
-    frameCopy = frame.copy()
-    pose_pairs = COCO_POSE_PAIRS if model_type == 'coco' else MPII_POSE_PAIRS
-
-    for partA, partB in pose_pairs:
-        if keypoints[partA] is not None and keypoints[partB] is not None:
-            cv2.line(frameCopy, keypoints[partA], keypoints[partB], SKELETON_COLOR, 3)
-            cv2.circle(frameCopy, keypoints[partA], 8, KEYPOINT_COLOR, -1, cv2.FILLED)
-            cv2.circle(frameCopy, keypoints[partB], 8, KEYPOINT_COLOR, -1, cv2.FILLED)
-
-    return frameCopy
-
-
-def process_image(image_path, model_type='coco'):
-    frame = cv2.imread(image_path)
-    if frame is None:
+def process_image(image_path):
+    """Process image with MediaPipe pose detection"""
+    # Read image
+    image = cv2.imread(image_path)
+    if image is None:
         return None, None, "Failed to read image"
-
-    # Resize large images to reduce memory usage
-    max_dimension = 800
-    h, w = frame.shape[:2]
-    if max(h, w) > max_dimension:
-        scale = max_dimension / max(h, w)
-        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-
-    net, msg = load_model(model_type)
-    if net is None:
-        return None, None, msg
-
-    keypoints, confidences = detect_keypoints(frame, net, model_type)
-    result_frame = draw_skeleton(frame, keypoints, model_type)
-
-    keypoint_names = COCO_KEYPOINTS if model_type == 'coco' else MPII_KEYPOINTS
+    
+    h, w, c = image.shape
+    
+    # Convert BGR to RGB for MediaPipe
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    # Run pose detection
+    results = pose.process(image_rgb)
+    
+    # Copy for drawing
+    output_image = image.copy()
+    
+    keypoints_detected = []
+    
+    if results.pose_landmarks:
+        # Draw skeleton using MediaPipe's drawing utilities
+        mp_drawing.draw_landmarks(
+            output_image,
+            results.pose_landmarks,
+            mp_pose.POSE_CONNECTIONS,
+            landmark_drawing_spec=mp_drawing.DrawingSpec(
+                color=(0, 255, 255),      # Yellow for keypoints
+                thickness=2,
+                circle_radius=2
+            ),
+            connection_drawing_spec=mp_drawing.DrawingSpec(
+                color=(0, 255, 0),        # Green for connections
+                thickness=2
+            )
+        )
+        
+        # Extract keypoints with confidence
+        for idx, landmark in enumerate(results.pose_landmarks.landmark):
+            x = int(landmark.x * w)
+            y = int(landmark.y * h)
+            confidence = landmark.visibility
+            
+            # Only include detected keypoints (confidence > 0.3)
+            if confidence > 0.3:
+                keypoints_detected.append({
+                    'id': idx,
+                    'name': KEYPOINT_NAMES[idx],
+                    'x': x,
+                    'y': y,
+                    'confidence': float(confidence)
+                })
+    
+    # Prepare result data
     result_data = {
-        'keypoints': [
-            {'id': idx, 'name': keypoint_names[idx], 'x': kp[0], 'y': kp[1], 'confidence': float(conf)}
-            for idx, (kp, conf) in enumerate(zip(keypoints, confidences)) if kp is not None
-        ],
-        'model': model_type,
-        'total_detected': sum(1 for kp in keypoints if kp is not None)
+        'keypoints': keypoints_detected,
+        'model': 'MediaPipe',
+        'model_info': '33 keypoints - includes face, hands, and body',
+        'total_detected': len(keypoints_detected)
     }
-
-    del net
-    import gc
-    gc.collect()
-
-    return result_frame, result_data, "Success"
-
+    
+    return output_image, result_data, "Success"
 
 @app.route('/')
 def index():
+    """Home page"""
     return render_template('index.html')
-
 
 @app.route('/result.html')
 def result_page():
     return render_template('result.html')
 
-
-@app.route('/upload', methods=['POST'])
+@app.route('/upload', methods=['GET', 'POST'])
 def upload():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-
-    file = request.files['file']
-    default_model = 'mpii' if MODELS_STATUS['mpii'] else 'coco'
-    model_type = request.form.get('model', default_model)
-
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-
-    if not allowed_file(file.filename):
-        return jsonify({'error': 'Invalid file type'}), 400
-
-    if model_type == 'coco' and not MODELS_STATUS['coco']:
-        model_type = 'mpii' if MODELS_STATUS['mpii'] else None
-    if model_type == 'mpii' and not MODELS_STATUS['mpii']:
-        model_type = 'coco' if MODELS_STATUS['coco'] else None
-
-    if model_type is None:
-        return jsonify({'error': 'No models available on server yet. Try again in a minute.'}), 503
-
-    try:
-        filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-
-        result_image, result_data, message = process_image(filepath, model_type)
-
-        if result_image is None:
+    """Handle file upload"""
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({
+                'error': 'Invalid file type. Allowed: PNG, JPG, JPEG, GIF, BMP'
+            }), 400
+        
+        try:
+            # Save uploaded file
+            filename = secure_filename(f"{datetime.now().timestamp()}_{file.filename}")
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            
+            # Process image
+            result_image, result_data, message = process_image(filepath)
+            
+            if result_image is None:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                return jsonify({'error': message}), 400
+            
+            # Save result image
+            result_filename = f"result_{datetime.now().timestamp()}.jpg"
+            result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
+            cv2.imwrite(result_path, result_image)
+            
+            # Clean up original
             if os.path.exists(filepath):
                 os.remove(filepath)
-            return jsonify({'error': message}), 400
+            
+            return jsonify({
+                'success': True,
+                'message': message,
+                'result_image': f"/static/uploads/{result_filename}",
+                'data': result_data
+            })
+        
+        except Exception as e:
+            return jsonify({'error': f'Processing error: {str(e)}'}), 500
+    
+    return render_template('upload.html')
 
-        result_filename = f"result_{datetime.now().timestamp()}.jpg"
-        result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
-        cv2.imwrite(result_path, result_image)
-
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
-        return jsonify({
-            'success': True,
-            'message': message,
-            'result_image': f"/static/uploads/{result_filename}",
-            'data': result_data
-        })
-
-    except Exception as e:
-        return jsonify({'error': f'Processing error: {str(e)}'}), 500
-
+@app.route('/api/models')
+def get_models():
+    """Get available models"""
+    return jsonify({
+        'mediapipe': {
+            'name': 'MediaPipe Pose',
+            'keypoints': 33,
+            'available': True,
+            'speed': 'Very fast',
+            'includes': ['Face', 'Hands', 'Body', 'Feet'],
+            'download': 'None - built-in!'
+        }
+    })
 
 @app.route('/status')
 def status():
-    return jsonify({'status': 'running', 'models': MODELS_STATUS})
-
+    """Get app status"""
+    return jsonify({
+        'status': 'running',
+        'model': 'MediaPipe Pose',
+        'keypoints': 33,
+        'ready': True
+    })
 
 @app.errorhandler(413)
-def too_large(e):
-    return jsonify({'error': 'File too large. Max 10MB'}), 413
+def request_entity_too_large(error):
+    """Handle file too large"""
+    return jsonify({'error': 'File too large. Maximum size is 10MB'}), 413
 
+@app.errorhandler(404)
+def not_found(error):
+    """Handle 404"""
+    return jsonify({'error': 'Not found'}), 404
 
 @app.errorhandler(500)
-def server_error(e):
+def internal_error(error):
+    """Handle 500"""
     return jsonify({'error': 'Internal server error'}), 500
 
-
-check_and_download_models()
-
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    print("\n" + "="*60)
+    print("🎯 MediaPipe Pose Estimation Web App")
+    print("="*60)
+    print("✓ Model loaded and ready!")
+    print("✓ No downloads needed!")
+    print("✓ 33 keypoints detection")
+    print("\nStarting server...")
+    print("Open: http://localhost:5000")
+    print("="*60 + "\n")
+    
+    # Development
+    app.run(debug=True, host='0.0.0.0', port=5000)
+    
+    # For production:
+    # gunicorn -w 4 -b 0.0.0.0:5000 app:app
