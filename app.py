@@ -31,8 +31,8 @@ MPII_PROTO = "models/mpi/pose_deploy_linevec_faster_4_stages.prototxt"
 MPII_WEIGHTS = "models/mpi/pose_iter_160000.caffemodel"
 
 MODEL_URLS = {
-    'coco_weights': 'https://github.com/CMU-Perceptual-Computing-Lab/openpose/releases/download/v1.7.0/pose_iter_440000.caffemodel',
-    'mpii_weights': 'https://github.com/CMU-Perceptual-Computing-Lab/openpose/releases/download/v1.7.0/pose_iter_160000.caffemodel',
+    'coco_weights': 'https://huggingface.co/gaijingeek/openpose-models/resolve/main/models/pose/coco/pose_iter_440000.caffemodel',
+    'mpii_weights': 'https://huggingface.co/gaijingeek/openpose-models/resolve/main/models/pose/mpi/pose_iter_160000.caffemodel',
 }
 
 COCO_KEYPOINTS = [
