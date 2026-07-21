@@ -6,6 +6,7 @@ Automatically downloads model weights from GitHub on startup
 from flask import Flask, render_template, request, jsonify
 import os
 import cv2
+import gc
 import numpy as np
 from werkzeug.utils import secure_filename
 from datetime import datetime
@@ -159,6 +160,13 @@ def process_image(image_path, model_type='coco'):
     if frame is None:
         return None, None, "Failed to read image"
 
+    # Resize large images to reduce memory usage
+    max_dimension = 800
+    h, w = frame.shape[:2]
+    if max(h, w) > max_dimension:
+        scale = max_dimension / max(h, w)
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+
     net, msg = load_model(model_type)
     if net is None:
         return None, None, msg
@@ -175,6 +183,10 @@ def process_image(image_path, model_type='coco'):
         'model': model_type,
         'total_detected': sum(1 for kp in keypoints if kp is not None)
     }
+
+    del net
+    import gc
+    gc.collect()
 
     return result_frame, result_data, "Success"
 
@@ -195,7 +207,7 @@ def upload():
         return jsonify({'error': 'No file provided'}), 400
 
     file = request.files['file']
-    default_model = 'coco' if MODELS_STATUS['coco'] else 'mpii'
+    default_model = 'mpii' if MODELS_STATUS['mpii'] else 'coco'
     model_type = request.form.get('model', default_model)
 
     if file.filename == '':
